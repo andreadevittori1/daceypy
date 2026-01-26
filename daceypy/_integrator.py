@@ -701,6 +701,14 @@ class integrator_optimized(integrator):
                     self._runningX += const_part
         
         self._set_final_outputs()
+        if np.all(states[-1].cons() != self._runningX.cons()):
+            len_states = len(states)
+            if self._input.t > t_eval[len_states -1]:
+                states.append(self._runningX.copy())
+            elif self._input.t < t_eval[len_states -1]:
+                states = states[:-1]
+                if self._input.t not in t_eval:
+                    states.append(self._runningX.copy())
         return states
 
 

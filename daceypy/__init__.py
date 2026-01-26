@@ -50,7 +50,7 @@ from . import op
 from ._ADS import ADS
 from . import RK
 from ._integrator import integrator, integrator_optimized 
-from ._ADSintegrator import ADSintegrator
+from ._ADSintegrator import ADSintegrator, ADSintegrator_optimized
 
 init = DA.init
 isInitialized = DA.isInitialized
