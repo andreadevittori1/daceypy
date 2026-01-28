@@ -552,7 +552,8 @@ class integrator_optimized(integrator):
                 f"(\"{self._stateType}\") however, "
                 f"(\"{type(self._runningX)}\") was given")
     
-
+    # def _computeStep(self):
+    #     return integrator._computeStep(self)
     def _computeStep(self) -> \
         Tuple[Union[daceypy.array, NDArray[np.double]], Union[daceypy.array, NDArray[np.double]]]:
         """
@@ -607,6 +608,9 @@ class integrator_optimized(integrator):
         pndiff *= h
         
         return pn, pndiff
+    
+    # def _adaptStepSize(self):
+    #     return integrator._adaptStepSize(self)
 
     def _adaptStepSize(self) -> None:
         """
@@ -765,9 +769,5 @@ class integrator_optimized(integrator):
         """Set final output values."""
         self._tout = self._input.t
         self._outX = self._runningX
-
-
-
-
 
 
