@@ -674,11 +674,6 @@ class ADSintegrator_optimized(integrator_optimized, metaclass=PrettyType):
                     t_vect_in
                 )
 
-                # xf = super(ADSintegrator_optimized, self).propagate(
-                #     self._stack.ADSPatch.manifold, 
-                #     t_vect_in
-                # )
-                
                 # Remove intermediate state if current time was not in original t_vect
                 if t_vect_in[0] not in t_vect:
                     xf = xf[1:]
