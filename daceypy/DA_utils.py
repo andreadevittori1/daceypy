@@ -35,6 +35,35 @@ def fill_symmetric_tensor(
         tensor[perm] = value
 
 
+# ---------------------------------------------------------------------------
+# Input validation: determine if sol is a single DA vector or a list thereof
+# ---------------------------------------------------------------------------
+def _is_da_element(obj) -> bool:
+    """Return True if obj looks like a single DA polynomial (has .cons method)."""
+    return hasattr(obj, 'cons') and callable(getattr(obj, 'cons', None))
+
+def _is_da_vector(obj) -> bool:
+    """Return True if obj is an iterable of DA polynomials (a DA state vector)."""
+    try:
+        return (
+            hasattr(obj, '__len__')
+            and len(obj) > 0
+            and _is_da_element(obj[0])
+        )
+    except (TypeError, KeyError):
+        return False
+
+def _is_list_of_da_vectors(obj) -> bool:
+    """Return True if obj is a non-empty list/tuple of DA state vectors."""
+    try:
+        return (
+            isinstance(obj, (list, tuple))
+            and len(obj) > 0
+            and _is_da_vector(obj[0])
+        )
+    except (TypeError, KeyError):
+        return False
+
 def extract_map(
     sol,
     max_order: int
@@ -95,26 +124,19 @@ def extract_map(
     if not isinstance(max_order, int) or max_order < 0:
         raise ValueError(f"'max_order' must be an integer ≥ 0, got {max_order!r}")
     
-    # Determine if input is single DA array or list of DA arrays
-    is_single_vector = hasattr(sol, '__len__') and hasattr(sol[0], 'cons')
-    is_list_of_vectors = (
-        isinstance(sol, list) and 
-        len(sol) > 0 and 
-        hasattr(sol[0], '__len__') and
-        hasattr(sol[0][0], 'cons')
-    )
-    
-    # Normalize input to list for uniform processing
-    if is_single_vector:
+    if _is_da_vector(sol) and not _is_list_of_da_vectors(sol):
         sol_list = [sol]
         return_single = True
-    elif is_list_of_vectors:
-        sol_list = sol
+    elif _is_list_of_da_vectors(sol):
+        sol_list = list(sol)
         return_single = False
     else:
         raise TypeError(
-            "Input 'sol' must be a DA array or list of DA arrays. "
-            f"Got type: {type(sol)}"
+            "Input 'sol' must be a DA state vector or a list/tuple of DA state vectors.\n"
+            f"  Expected: iterable of DA polynomials, or list thereof.\n"
+            f"  Got:      {type(sol).__name__!r}"
+            + (f" with first element of type {type(sol[0]).__name__!r}"
+               if hasattr(sol, '__len__') and len(sol) > 0 else "")
         )
     
     # Process each time instant

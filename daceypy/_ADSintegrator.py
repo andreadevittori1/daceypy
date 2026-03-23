@@ -675,7 +675,7 @@ class ADSintegrator_optimized(integrator_optimized, metaclass=PrettyType):
                 )
 
                 # Remove intermediate state if current time was not in original t_vect
-                if t_vect_in[0] not in t_vect:
+                if t_vect_in[0] not in t_vect and len(xf) > 1:
                     xf = xf[1:]
 
                 # Identify time points covered in this propagation step
