@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 from itertools import permutations
 from math import factorial
 from collections import Counter
@@ -66,7 +66,7 @@ def _is_list_of_da_vectors(obj) -> bool:
 
 def extract_map(
     sol,
-    max_order: int
+    max_order: Optional[int] = None
 ) -> Union[Dict[str, NDArray[np.float64]], List[Dict[str, NDArray[np.float64]]]]:
     """
     Extract Taylor expansion terms (0th, 1st, 2nd, ...) from a DA state transition map.
@@ -77,8 +77,10 @@ def extract_map(
         - If DA array: Single DA state vector
         - If list of DA arrays: List of DA state vectors (one per time instant)
         Each sol[i] (or sol[j][i]) is a DA polynomial representing the i-th state component.
-    max_order : int
+    max_order : int, optional
         Maximum Taylor expansion order to extract (≥ 0).
+        If None (default), all available orders are extracted automatically
+        by inspecting the DA polynomials' monomial structure.
     
     Returns
     -------
@@ -100,7 +102,7 @@ def extract_map(
     Raises
     ------
     ValueError
-        If `max_order` is not a non-negative integer.
+        If `max_order` is provided but is not a non-negative integer.
     TypeError
         If `sol` is not a DA array or list of DA arrays.
     
@@ -109,19 +111,24 @@ def extract_map(
     This function converts DA polynomial representations into structured
     NumPy tensors suitable for sensitivity analysis, uncertainty propagation,
     or higher-order control and estimation.
-    
+    When `max_order` is None, the maximum order is inferred from the highest-degree
+    monomial found across all state components of the first time instant.
+
     Examples
     --------
-    >>> # Single state vector
-    >>> taylor_terms = extract_map(state_vector, max_order=2)
+    >>> # Single state vector — extract all available orders
+    >>> taylor_terms = extract_map(state_vector)
     >>> print(taylor_terms['Taylor_order_0'].shape)  # (n_state,)
     
+    >>> # Single state vector — cap at order 2
+    >>> taylor_terms = extract_map(state_vector, max_order=2)
+
     >>> # Multiple time instants
     >>> taylor_series = extract_map([state_0, state_1, state_2], max_order=2)
     >>> print(len(taylor_series))  # 3
     >>> print(taylor_series[0]['Taylor_order_1'].shape)  # (n_state, n_state)
     """
-    if not isinstance(max_order, int) or max_order < 0:
+    if max_order is not None and (not isinstance(max_order, int) or max_order < 0):
         raise ValueError(f"'max_order' must be an integer ≥ 0, got {max_order!r}")
     
     if _is_da_vector(sol) and not _is_list_of_da_vectors(sol):
@@ -138,7 +145,11 @@ def extract_map(
             + (f" with first element of type {type(sol[0]).__name__!r}"
                if hasattr(sol, '__len__') and len(sol) > 0 else "")
         )
-    
+
+    # --- Infer max_order from the DA structure if not provided ---
+    if max_order is None:
+        max_order = _infer_max_order(sol_list[0])
+
     # Process each time instant
     expansion = []
     
@@ -188,3 +199,16 @@ def extract_map(
     
     # Return in appropriate format
     return expansion[0] if return_single else expansion
+
+
+def _infer_max_order(sol_j) -> int:
+    """Infer the maximum monomial order present in a DA state vector."""
+    max_ord = 0
+    for i in range(len(sol_j)):
+        n_monomials = sol_j[i].m_index.len + 1
+        for k in range(n_monomials):
+            monomial = sol_j[i].getMonomial(k)
+            order = int(np.sum(np.array(monomial.m_jj, dtype=int)))
+            if order > max_ord:
+                max_ord = order
+    return max_ord
