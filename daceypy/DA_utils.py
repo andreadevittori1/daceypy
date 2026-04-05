@@ -148,7 +148,7 @@ def extract_map(
 
     # --- Infer max_order from the DA structure if not provided ---
     if max_order is None:
-        max_order = _infer_max_order(sol_list[0])
+        max_order = _infer_max_order(sol_list[-1])
 
     # Process each time instant
     expansion = []
