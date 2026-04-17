@@ -2,6 +2,7 @@ import numpy as np
 from typing import List, Dict, Tuple, Optional, Union, Any
 from daceypy.DA_utils import extract_map
 from scipy.spatial import KDTree
+import itertools
 
 
 def extract_all_taylor_maps(
@@ -81,7 +82,8 @@ def extract_all_taylor_maps(
 def assign_points_to_domains(
     ADS_domains: Union[List[Any], List[List[Any]]], 
     points: np.ndarray, 
-    order_DA: Optional[int] = None
+    order_DA: Optional[int] = None,
+    basis: Optional[np.ndarray] = None,
 ) -> Union[List[Dict], List[List[Dict]]]:
     """
     Fully optimized version using KDTree with vectorized bounding box checks.
@@ -96,6 +98,10 @@ def assign_points_to_domains(
         Points to be assigned to ADS subdomains
     order_DA : int, optional
         Order for extracting the Taylor expansion. If None, Taylor maps are not extracted.
+    basis : np.ndarray, optional
+        Orthonormal basis whose columns define the coordinates used for
+        assignment. If provided, both points and propagated subdomain corners
+        are projected into this basis before the bounding-box test.
     
     Returns
     -------
@@ -108,6 +114,8 @@ def assign_points_to_domains(
             - 'n_points': int - number of points in this domain
             - 'DA_map': DA object - raw DA manifold
             - 'box': dict with 'min', 'max', 'center' (all np.ndarray)
+            - 'box_basis': dict with 'min', 'max', 'center' in the provided
+              basis coordinates (only if basis is provided)
             - 'Taylor_map': np.ndarray - (only if order_DA is provided)
     """
     # Convert points to numpy array and validate dimensions
@@ -118,6 +126,16 @@ def assign_points_to_domains(
     n_points: int
     ndim: int
     n_points, ndim = points_array.shape
+
+    if basis is not None:
+        basis = np.asarray(basis, dtype=np.float64)
+        if basis.shape != (ndim, ndim):
+            raise ValueError(
+                f"basis must have shape ({ndim}, {ndim}), got {basis.shape}"
+            )
+        points_basis: np.ndarray = points_array @ basis
+    else:
+        points_basis = points_array
     
     # Check if input is a list of lists (multiple times) or single list
     is_multiple_times: bool = (
@@ -141,6 +159,9 @@ def assign_points_to_domains(
         mins: np.ndarray = np.zeros((n_domains, ndim))
         maxs: np.ndarray = np.zeros((n_domains, ndim))
         centers: np.ndarray = np.zeros((n_domains, ndim))
+        mins_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
+        maxs_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
+        centers_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
         
         for i, patch in enumerate(patches):
             min_corner: np.ndarray = np.array(patch.box.eval([-1] * ndim)).reshape(ndim)
@@ -149,16 +170,31 @@ def assign_points_to_domains(
             mins[i] = min_corner
             maxs[i] = max_corner
             centers[i] = 0.5 * (min_corner + max_corner)
+
+            if basis is not None:
+                corners = np.array([
+                    np.array(patch.box.eval(list(signs))).reshape(ndim)
+                    for signs in itertools.product([-1, 1], repeat=ndim)
+                ])
+                corners_basis = corners @ basis
+                mins_basis[i] = np.min(corners_basis, axis=0)
+                maxs_basis[i] = np.max(corners_basis, axis=0)
+                centers_basis[i] = 0.5 * (mins_basis[i] + maxs_basis[i])
         
         # Build KDTree from domain centers
-        tree: KDTree = KDTree(centers)
+        tree: KDTree = KDTree(centers_basis if basis is not None else centers)
         
         # --- 2. Vectorized point assignment ---
         point_to_domain: np.ndarray = np.full(n_points, -1, dtype=np.int64)
         
         # Vectorized inside-box check: shape (n_points, n_domains)
-        inside_min: np.ndarray = points_array[:, np.newaxis, :] >= mins[np.newaxis, :, :]  # (n_points, n_domains, ndim)
-        inside_max: np.ndarray = points_array[:, np.newaxis, :] <= maxs[np.newaxis, :, :]  # (n_points, n_domains, ndim)
+        mins_eval = mins_basis if basis is not None else mins
+        maxs_eval = maxs_basis if basis is not None else maxs
+        centers_eval = centers_basis if basis is not None else centers
+        points_eval = points_basis if basis is not None else points_array
+
+        inside_min: np.ndarray = points_eval[:, np.newaxis, :] >= mins_eval[np.newaxis, :, :]  # (n_points, n_domains, ndim)
+        inside_max: np.ndarray = points_eval[:, np.newaxis, :] <= maxs_eval[np.newaxis, :, :]  # (n_points, n_domains, ndim)
         is_inside: np.ndarray = np.all(inside_min & inside_max, axis=2)  # (n_points, n_domains)
         
         # For each point, check if it's inside any domain
@@ -172,13 +208,13 @@ def assign_points_to_domains(
                 else:
                     # Point is inside multiple domains - choose nearest center
                     distances: np.ndarray = np.linalg.norm(
-                        centers[inside_domains] - points_array[i], 
+                        centers_eval[inside_domains] - points_eval[i], 
                         axis=1
                     )
                     point_to_domain[i] = inside_domains[np.argmin(distances)]
             else:
                 # Point is outside all domains - use KDTree
-                _, nearest_idx = tree.query(points_array[i])
+                _, nearest_idx = tree.query(points_eval[i])
                 point_to_domain[i] = nearest_idx
         
         # --- 3. Build point assignments grouped by domain ---
@@ -199,6 +235,14 @@ def assign_points_to_domains(
                         "center": centers[domain_idx]
                     }
                 }
+
+                if basis is not None and mins_basis is not None and maxs_basis is not None and centers_basis is not None:
+                    assignment["box_basis"] = {
+                        "min": mins_basis[domain_idx],
+                        "max": maxs_basis[domain_idx],
+                        "center": centers_basis[domain_idx],
+                        "basis": basis,
+                    }
                 
                 # Extract Taylor map if order is specified
                 if order_DA is not None:
