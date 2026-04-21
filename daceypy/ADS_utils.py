@@ -80,184 +80,210 @@ def extract_all_taylor_maps(
 
 
 def assign_points_to_domains(
-    ADS_domains: Union[List[Any], List[List[Any]]], 
-    points: np.ndarray, 
+    ADS_domains: Union[List[Any], List[List[Any]]],
+    points: np.ndarray,
     order_DA: Optional[int] = None,
-    basis: Optional[np.ndarray] = None,
 ) -> Union[List[Dict], List[List[Dict]]]:
     """
-    Fully optimized version using KDTree with vectorized bounding box checks.
-    Best for large numbers of points and domains.
-    
+    Assign points to ADS sub-domains using an exact membership test.
+
+    For each propagated ADS patch the physical-space map is:
+
+        x = origin + Axes @ u,   u in [-1, 1]^n
+
+    where
+        origin = patch.box.eval([0, 0, ..., 0])
+        Axes[:, k] = patch.box.eval(e_k) - origin   (k-th column)
+
+    A point x0 belongs to the patch iff ALL components of
+        u0 = Axes^{-1} @ (x0 - origin)
+    satisfy |u0_k| <= 1 (with a small tolerance).
+
+    This test is exact for any patch shape (axis-aligned, rotated, skewed)
+    and does NOT require a basis projection.
+
+    The ``basis`` parameter is accepted for API compatibility but is NOT
+    used for the membership test; it is stored in the assignment dict so
+    that callers (e.g. compute_stm_stt_ADS) can access it if needed.
+
     Parameters
     ----------
     ADS_domains : list[ADSstate] or list[list[ADSstate]]
-        - If list: Single list of ADSstate objects (with ADSPatch attribute)
-        - If list of lists: Multiple lists of ADSstate objects (one per time)
-    points : np.ndarray of shape (N, ndim)
-        Points to be assigned to ADS subdomains
+    points : np.ndarray, shape (N, ndim)
     order_DA : int, optional
-        Order for extracting the Taylor expansion. If None, Taylor maps are not extracted.
-    basis : np.ndarray, optional
-        Orthonormal basis whose columns define the coordinates used for
-        assignment. If provided, both points and propagated subdomain corners
-        are projected into this basis before the bounding-box test.
-    
+        If given, Taylor maps are extracted and stored in each assignment.
+    basis : np.ndarray, shape (ndim, ndim), optional
+        Stored in assignment["basis"] for downstream use; does not
+        influence domain assignment.
+
     Returns
     -------
-    point_assignments : list[dict] or list[list[dict]]
-        Assignment dictionaries grouped by domain
-        
+    list[dict] or list[list[dict]]
         Each dict contains:
-            - 'domain_index': int - index of the domain
-            - 'point_indices': np.ndarray - indices of assigned points
-            - 'n_points': int - number of points in this domain
-            - 'DA_map': DA object - raw DA manifold
-            - 'box': dict with 'min', 'max', 'center' (all np.ndarray)
-            - 'box_basis': dict with 'min', 'max', 'center' in the provided
-              basis coordinates (only if basis is provided)
-            - 'Taylor_map': np.ndarray - (only if order_DA is provided)
+            "domain_index"  : int
+            "point_indices" : np.ndarray of int
+            "n_points"      : int
+            "DA_map"        : DA manifold object
+            "box"           : {"min", "max", "center"} in physical coords
+            "patch_origin"  : np.ndarray  – origin of the patch (eval at 0)
+            "patch_axes"    : np.ndarray  – columns are physical axis vectors
+            "Taylor_map"    : dict  (only if order_DA is not None)
+            "basis"         : np.ndarray  (only if basis is not None)
     """
-    # Convert points to numpy array and validate dimensions
-    points_array: np.ndarray = np.asarray(points, dtype=np.float64)
+    points_array = np.asarray(points, dtype=np.float64)
     if points_array.ndim == 1:
-        points_array = points_array.reshape(-1, 1)
-    
-    n_points: int
-    ndim: int
+        points_array = points_array.reshape(1, -1)
     n_points, ndim = points_array.shape
 
-    if basis is not None:
-        basis = np.asarray(basis, dtype=np.float64)
-        if basis.shape != (ndim, ndim):
-            raise ValueError(
-                f"basis must have shape ({ndim}, {ndim}), got {basis.shape}"
-            )
-        points_basis: np.ndarray = points_array @ basis
-    else:
-        points_basis = points_array
-    
-    # Check if input is a list of lists (multiple times) or single list
-    is_multiple_times: bool = (
-        isinstance(ADS_domains, list) and 
-        len(ADS_domains) > 0 and 
-        isinstance(ADS_domains[0], list)
+    is_multiple_times = (
+        isinstance(ADS_domains, list)
+        and len(ADS_domains) > 0
+        and isinstance(ADS_domains[0], list)
     )
-    
-    # If single list, wrap it to use same logic
-    ADS_domains_list: List[List[Any]] = ADS_domains if is_multiple_times else [ADS_domains]
-    
-    # Process each time step
+    domains_list = ADS_domains if is_multiple_times else [ADS_domains]
+
     all_point_assignments: List[List[Dict]] = []
-    
-    for time_idx, ADS_domains_at_time in enumerate(ADS_domains_list):
-        # Extract ADS patches from domain objects
-        patches: List[Any] = [domain.ADSPatch for domain in ADS_domains_at_time]
-        n_domains: int = len(patches)
-        
-        # --- 1. Vectorized bounding box computation ---
-        mins: np.ndarray = np.zeros((n_domains, ndim))
-        maxs: np.ndarray = np.zeros((n_domains, ndim))
-        centers: np.ndarray = np.zeros((n_domains, ndim))
-        mins_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
-        maxs_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
-        centers_basis: Optional[np.ndarray] = np.zeros((n_domains, ndim)) if basis is not None else None
-        
+
+    for ADS_domains_at_time in domains_list:
+        patches = [d.ADSPatch for d in ADS_domains_at_time]
+        n_domains = len(patches)
+
+        # ------------------------------------------------------------------ #
+        # 1. Compute exact patch geometry for every sub-domain               #
+        # ------------------------------------------------------------------ #
+        # For each patch:  x = origin + Axes @ u,  u in [-1,1]^n
+        # origin = patch.box.eval([0]*n)
+        # Axes[:, k] = patch.box.eval(e_k) - origin
+        patch_origins = np.zeros((n_domains, ndim))  # (n_domains, ndim)
+        patch_axes    = np.zeros((n_domains, ndim, ndim))  # (n_domains, ndim, ndim)
+        # Also keep axis-aligned bounding boxes for quick pre-filter and KDTree
+        phys_mins    = np.zeros((n_domains, ndim))
+        phys_maxs    = np.zeros((n_domains, ndim))
+        phys_centers = np.zeros((n_domains, ndim))
+
         for i, patch in enumerate(patches):
-            min_corner: np.ndarray = np.array(patch.box.eval([-1] * ndim)).reshape(ndim)
-            max_corner: np.ndarray = np.array(patch.box.eval([+1] * ndim)).reshape(ndim)
-            
-            mins[i] = min_corner
-            maxs[i] = max_corner
-            centers[i] = 0.5 * (min_corner + max_corner)
+            # Origin = center of the parametric domain
+            origin = np.asarray(patch.box.eval([0] * ndim), dtype=float).ravel()
+            patch_origins[i] = origin
 
-            if basis is not None:
-                corners = np.array([
-                    np.array(patch.box.eval(list(signs))).reshape(ndim)
-                    for signs in itertools.product([-1, 1], repeat=ndim)
-                ])
-                corners_basis = corners @ basis
-                mins_basis[i] = np.min(corners_basis, axis=0)
-                maxs_basis[i] = np.max(corners_basis, axis=0)
-                centers_basis[i] = 0.5 * (mins_basis[i] + maxs_basis[i])
-        
-        # Build KDTree from domain centers
-        tree: KDTree = KDTree(centers_basis if basis is not None else centers)
-        
-        # --- 2. Vectorized point assignment ---
-        point_to_domain: np.ndarray = np.full(n_points, -1, dtype=np.int64)
-        
-        # Vectorized inside-box check: shape (n_points, n_domains)
-        mins_eval = mins_basis if basis is not None else mins
-        maxs_eval = maxs_basis if basis is not None else maxs
-        centers_eval = centers_basis if basis is not None else centers
-        points_eval = points_basis if basis is not None else points_array
+            # Axis vectors: column k of Axes
+            for k in range(ndim):
+                ek = [1 if j == k else 0 for j in range(ndim)]
+                patch_axes[i, :, k] = (
+                    np.asarray(patch.box.eval(ek), dtype=float).ravel() - origin
+                )
 
-        inside_min: np.ndarray = points_eval[:, np.newaxis, :] >= mins_eval[np.newaxis, :, :]  # (n_points, n_domains, ndim)
-        inside_max: np.ndarray = points_eval[:, np.newaxis, :] <= maxs_eval[np.newaxis, :, :]  # (n_points, n_domains, ndim)
-        is_inside: np.ndarray = np.all(inside_min & inside_max, axis=2)  # (n_points, n_domains)
-        
-        # For each point, check if it's inside any domain
+            # Axis-aligned bounding box from all 2^n corners
+            corners = np.array([
+                np.asarray(patch.box.eval(list(s)), dtype=float).ravel()
+                for s in itertools.product([-1, 1], repeat=ndim)
+            ])
+            phys_mins[i]    = corners.min(axis=0)
+            phys_maxs[i]    = corners.max(axis=0)
+            phys_centers[i] = 0.5 * (phys_mins[i] + phys_maxs[i])
+
+        # KDTree on physical centers for KNN fallback
+        tree = KDTree(phys_centers)
+
+        # ------------------------------------------------------------------ #
+        # 2. Assign each point to its patch                                  #
+        # ------------------------------------------------------------------ #
+        MEMBERSHIP_TOL = 1e-10  # tolerance on |u_k| <= 1
+
+        point_to_domain = np.full(n_points, -1, dtype=np.int64)
+
+        # Pre-filter with axis-aligned bounding box (fast vectorised check)
+        inside_aabb = np.all(
+            (points_array[:, np.newaxis, :] >= phys_mins[np.newaxis, :, :]) &
+            (points_array[:, np.newaxis, :] <= phys_maxs[np.newaxis, :, :]),
+            axis=2,
+        )  # (n_points, n_domains)
+
         for i in range(n_points):
-            inside_domains: np.ndarray = np.where(is_inside[i])[0]
-            
-            if len(inside_domains) > 0:
-                if len(inside_domains) == 1:
-                    # Point is inside exactly one domain
-                    point_to_domain[i] = inside_domains[0]
-                else:
-                    # Point is inside multiple domains - choose nearest center
-                    distances: np.ndarray = np.linalg.norm(
-                        centers_eval[inside_domains] - points_eval[i], 
-                        axis=1
-                    )
-                    point_to_domain[i] = inside_domains[np.argmin(distances)]
+            x0 = points_array[i]
+            candidate_domains = np.where(inside_aabb[i])[0]
+
+            # Exact membership test on AABB candidates
+            exact_inside = []
+            for d in candidate_domains:
+                try:
+                    u = np.linalg.solve(patch_axes[d], x0 - patch_origins[d])
+                    if np.all(np.abs(u) <= 1.0 + MEMBERSHIP_TOL):
+                        exact_inside.append(d)
+                except np.linalg.LinAlgError:
+                    pass  # singular patch: skip
+
+            if len(exact_inside) == 1:
+                point_to_domain[i] = exact_inside[0]
+            elif len(exact_inside) > 1:
+                # Rare overlap: pick the patch whose parametric centre is closest
+                u_norms = []
+                for d in exact_inside:
+                    try:
+                        u = np.linalg.solve(patch_axes[d], x0 - patch_origins[d])
+                        u_norms.append(np.linalg.norm(u))
+                    except np.linalg.LinAlgError:
+                        u_norms.append(np.inf)
+                point_to_domain[i] = exact_inside[int(np.argmin(u_norms))]
             else:
-                # Point is outside all domains - use KDTree
-                _, nearest_idx = tree.query(points_eval[i])
-                point_to_domain[i] = nearest_idx
-        
-        # --- 3. Build point assignments grouped by domain ---
+                # Not inside any AABB candidate – run exact test on ALL domains
+                # (handles the case where AABB pre-filter was too tight due to
+                #  tolerance or numerical drift)
+                truly_inside = []
+                for d in range(n_domains):
+                    try:
+                        u = np.linalg.solve(patch_axes[d], x0 - patch_origins[d])
+                        if np.all(np.abs(u) <= 1.0 + MEMBERSHIP_TOL):
+                            truly_inside.append(d)
+                    except np.linalg.LinAlgError:
+                        pass
+
+                if truly_inside:
+                    if len(truly_inside) == 1:
+                        point_to_domain[i] = truly_inside[0]
+                    else:
+                        u_norms = []
+                        for d in truly_inside:
+                            u = np.linalg.solve(patch_axes[d], x0 - patch_origins[d])
+                            u_norms.append(np.linalg.norm(u))
+                        point_to_domain[i] = truly_inside[int(np.argmin(u_norms))]
+                else:
+                    # True fallback: nearest physical center
+                    _, nearest = tree.query(x0)
+                    point_to_domain[i] = nearest
+
+        # ------------------------------------------------------------------ #
+        # 3. Build assignment dicts grouped by domain                        #
+        # ------------------------------------------------------------------ #
         point_assignments: List[Dict] = []
-        
-        for domain_idx in range(n_domains):
-            assigned_point_indices: np.ndarray = np.where(point_to_domain == domain_idx)[0]
-            
-            if assigned_point_indices.size > 0:
-                assignment: Dict = {
-                    "domain_index": domain_idx,
-                    "point_indices": assigned_point_indices,
-                    "n_points": len(assigned_point_indices),
-                    "DA_map": patches[domain_idx].manifold,
-                    "box": {
-                        "min": mins[domain_idx],
-                        "max": maxs[domain_idx],
-                        "center": centers[domain_idx]
-                    }
-                }
 
-                if basis is not None and mins_basis is not None and maxs_basis is not None and centers_basis is not None:
-                    assignment["box_basis"] = {
-                        "min": mins_basis[domain_idx],
-                        "max": maxs_basis[domain_idx],
-                        "center": centers_basis[domain_idx],
-                        "basis": basis,
-                    }
-                
-                # Extract Taylor map if order is specified
-                if order_DA is not None:
-                    assignment["Taylor_map"] = extract_map(
-                        patches[domain_idx].manifold, 
-                        order_DA
-                    )
-                
-                point_assignments.append(assignment)
-        
+        for d in range(n_domains):
+            idx = np.where(point_to_domain == d)[0]
+            if idx.size == 0:
+                continue
+
+            entry: Dict = {
+                "domain_index":  d,
+                "point_indices": idx,
+                "n_points":      len(idx),
+                "DA_map":        patches[d].manifold,
+                "box": {
+                    "min":    phys_mins[d],
+                    "max":    phys_maxs[d],
+                    "center": phys_centers[d],
+                },
+                "patch_origin": patch_origins[d],        # origin in physical space
+                "patch_axes":   patch_axes[d],           # columns = axis vectors
+            }
+
+            if order_DA is not None:
+                entry["Taylor_map"] = extract_map(patches[d].manifold, order_DA)
+
+            point_assignments.append(entry)
+
         all_point_assignments.append(point_assignments)
-    
-    # Return single list if input was single list, otherwise return list of lists
-    return all_point_assignments[0] if not is_multiple_times else all_point_assignments
 
+    return all_point_assignments[0] if not is_multiple_times else all_point_assignments
 
 def prepare_visualization_data(
     ADS_domains: List[Any], 
