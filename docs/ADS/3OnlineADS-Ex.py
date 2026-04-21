@@ -400,86 +400,86 @@ def main():
     perimeter_norm[:, 0] = perimeter[:,0]/xb
     perimeter_norm[:, 1] = perimeter[:,1]/yb
 
-    # # propagation of ground truth perimeters (first run is going to take a while)
-    # try:
-    #     # load the propagated domain if integration already exists
-    #     with (thisfolder / 'ground_truth_propagations.npy').open('rb') as f:
-    #         XF = np.load(f, allow_pickle = True)
-    # except FileNotFoundError:
-    #     # integrate for half the orbital period
-    #     XFtemp = np.zeros((4, Ts))
-    #     XF = np.zeros((4,Ts,perimeter.shape[0]))
+    # propagation of ground truth perimeters (first run is going to take a while)
+    try:
+        # load the propagated domain if integration already exists
+        with (thisfolder / 'ground_truth_propagations.npy').open('rb') as f:
+            XF = np.load(f, allow_pickle = True)
+    except FileNotFoundError:
+        # integrate for half the orbital period
+        XFtemp = np.zeros((4, Ts))
+        XF = np.zeros((4,Ts,perimeter.shape[0]))
 
-    # # with DA.cache_manager():  # optional, for efficiency
-    #     for j in range(perimeter.shape[0]):
-    #         x0 = XI.copy()
-    #         x0[0:2]+=perimeter[j,:]
-    #         XFtemp[:,0]=x0.cons()
-    #         for i in range(Ts-1):
-    #             t0=tgrid[i]
-    #             tf=tgrid[i+1]
-    #             xf = RK78(x0, t0, tf, TBP)
-    #             x0 = xf
-    #             XFtemp[:,i+1]=xf.cons()
-    #         XF[:,:,j]=XFtemp
+    # with DA.cache_manager():  # optional, for efficiency
+        for j in range(perimeter.shape[0]):
+            x0 = XI.copy()
+            x0[0:2]+=perimeter[j,:]
+            XFtemp[:,0]=x0.cons()
+            for i in range(Ts-1):
+                t0=tgrid[i]
+                tf=tgrid[i+1]
+                xf = RK78(x0, t0, tf, TBP)
+                x0 = xf
+                XFtemp[:,i+1]=xf.cons()
+            XF[:,:,j]=XFtemp
 
-    #     with (thisfolder / 'ground_truth_propagations.npy').open('wb') as f:
-    #         np.save(f, XF, allow_pickle = True)
+        with (thisfolder / 'ground_truth_propagations.npy').open('wb') as f:
+            np.save(f, XF, allow_pickle = True)
 
-    # # compute only highest order propagation and lower orders evaluated by truncating poly map
-    # try:
-    #     # load the propagated domain if integration already exists
-    #     with (thisfolder / 'order_6.npy').open('rb') as f:
-    #         XF6 = np.load(f, allow_pickle = True)
-    #     with (thisfolder / 'order_14.npy').open('rb') as f:
-    #         XF14 = np.load(f, allow_pickle = True)
-    # except FileNotFoundError:
-    #     DA.init(14, 2)
-    #     DA.setEps(1e-16)
+    # compute only highest order propagation and lower orders evaluated by truncating poly map
+    try:
+        # load the propagated domain if integration already exists
+        with (thisfolder / 'order_6.npy').open('rb') as f:
+            XF6 = np.load(f, allow_pickle = True)
+        with (thisfolder / 'order_14.npy').open('rb') as f:
+            XF14 = np.load(f, allow_pickle = True)
+    except FileNotFoundError:
+        DA.init(14, 2)
+        DA.setEps(1e-16)
 
-    #     XI = array.zeros(4)
-    #     XI[0] += 1.0 + xb * DA(1)
-    #     XI[1] += 0.0 + yb * DA(2)
-    #     XI[3] += np.sqrt(1.5)
+        XI = array.zeros(4)
+        XI[0] += 1.0 + xb * DA(1)
+        XI[1] += 0.0 + yb * DA(2)
+        XI[3] += np.sqrt(1.5)
 
-    #     XFN = array.zeros((4,Ts))
-    #     XFN[:, 0] = XI.copy()
+        XFN = array.zeros((4,Ts))
+        XFN[:, 0] = XI.copy()
 
-    # # with DA.cache_manager():  # optional, for efficiency
-    #     x0 = array(XI)
-    #     xf = array(XI)
-    #     for i in range(Ts-1):
-    #         t0 = tgrid[i]
-    #         tf = tgrid[i+1]
-    #         xf = RK78(x0, t0, tf, TBP)
-    #         XFN[:, i+1] = xf.copy()
+    # with DA.cache_manager():  # optional, for efficiency
+        x0 = array(XI)
+        xf = array(XI)
+        for i in range(Ts-1):
+            t0 = tgrid[i]
+            tf = tgrid[i+1]
+            xf = RK78(x0, t0, tf, TBP)
+            XFN[:, i+1] = xf.copy()
 
-    #         x0 = xf
+            x0 = xf
 
-    #     DA.pushTO(6)
-    #     XF6 = np.zeros((4,Ts,perimeter_norm.shape[0]))
-    #     x_sub = array.identity(2)
-    #     for i in range(Ts):
-    #         xf=XFN[:,i].copy()
-    #         xf_temp=xf.eval(x_sub)
-    #         for j in range(perimeter_norm.shape[0]):
-    #             XF6[:,i,j]=xf_temp.eval(perimeter_norm[j,:])
-    #     DA.popTO()
+        DA.pushTO(6)
+        XF6 = np.zeros((4,Ts,perimeter_norm.shape[0]))
+        x_sub = array.identity(2)
+        for i in range(Ts):
+            xf=XFN[:,i].copy()
+            xf_temp=xf.eval(x_sub)
+            for j in range(perimeter_norm.shape[0]):
+                XF6[:,i,j]=xf_temp.eval(perimeter_norm[j,:])
+        DA.popTO()
 
-    #     XF14 = np.zeros((4,Ts,perimeter_norm.shape[0]))
-    #     for i in range(Ts):
-    #         xf=XFN[:,i].copy()
-    #         for j in range(perimeter_norm.shape[0]):
-    #             XF14[:,i,j]=xf.eval(perimeter_norm[j,:])
+        XF14 = np.zeros((4,Ts,perimeter_norm.shape[0]))
+        for i in range(Ts):
+            xf=XFN[:,i].copy()
+            for j in range(perimeter_norm.shape[0]):
+                XF14[:,i,j]=xf.eval(perimeter_norm[j,:])
 
-    #     with (thisfolder / 'order_6.npy').open('wb') as f:
-    #         np.save(f, XF6, allow_pickle = True)
-    #     with (thisfolder / 'order_14.npy').open('wb') as f:
-    #         np.save(f, XF14, allow_pickle = True)
+        with (thisfolder / 'order_6.npy').open('wb') as f:
+            np.save(f, XF6, allow_pickle = True)
+        with (thisfolder / 'order_14.npy').open('wb') as f:
+            np.save(f, XF14, allow_pickle = True)
 
 
     ########################### Online ADS application ##########################
-    DA.init(6, 2)
+    DA.init(2, 6)
     DA.setEps(1e-16)
     XI = array.zeros(4)
     XI[0] += 1.0 + xb * DA(1)
@@ -494,27 +494,15 @@ def main():
     Nmax = 100
 
     TFlocal = 35
-    t_eval = np.linspace(T0, TFlocal, 2)
 
     # new part wrt the other tutorial!
-    init_time = time.time()
     propagator_78 = AutomaticADS_TBP_integrator(RK.RK78())
     propagator_78.loadTime(T0, TFlocal)
     propagator_78.loadTol(20*1e-12, 1e-12)
     propagator_78.loadStepSize()
     propagator_78.loadADSopt(toll, Nmax)
     listOut = propagator_78.propagate(init_list, T0, TFlocal)
-    comp_time = time.time() - init_time
-    print('Computation time ADS integrator: ', comp_time, ' seconds')
-    init_time = time.time()
-    propagator_78 = AutomaticADS_TBP_integrator_optimized(RK.RK78())
-    propagator_78.loadTime(T0, TFlocal)
-    propagator_78.loadTol(20*1e-12, 1e-12)
-    propagator_78.loadStepSize()
-    propagator_78.loadADSopt(toll, Nmax)
-    listOut = propagator_78.propagate(init_list, t_eval)
-    comp_time = time.time() - init_time
-    print('Computation time ADS integrator optimized: ', comp_time, ' seconds')
+
     DomainList = [o.ADSPatch for o in listOut]
 
     ax1 = figure_1([DomainList], XF, XF6, Ns, perimeter_norm, [TFlocal])
@@ -524,7 +512,6 @@ def main():
     plt.show()
 
     print('End')
-
 
 if __name__ == "__main__":
     main()
