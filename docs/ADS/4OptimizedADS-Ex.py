@@ -2,8 +2,6 @@ from inspect import getsourcefile
 from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 from numpy.typing import NDArray
 from daceypy import ADS, DA, array, RK
@@ -13,6 +11,9 @@ from daceypy._ADSintegrator import ADSstate
 import time
 import itertools
 from matplotlib.cm import get_cmap
+import os
+from scipy.spatial import ConvexHull
+from matplotlib.collections import LineCollection
 
 
 def CR3BP(x: array, t: float, mu: float) -> array:
@@ -79,96 +80,269 @@ class AutomaticADS_CR3BP_integrator(ADSintegrator):
 
 
 
+def _local_coordinates(
+    pts: np.ndarray,
+    x0: np.ndarray,
+    rotation: np.ndarray | None = None,
+    basis_matrix: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Map physical points to local coordinates around x0.
+
+    If basis_matrix is provided, it is interpreted as the columns of the
+    affine basis matrix B such that x = x0 + B u and therefore u is obtained
+    by solving B u = x - x0.
+
+    If rotation is provided instead, it is interpreted as an orthonormal
+    rotation matrix and the coordinates are computed as (x - x0) @ rotation.T.
+    """
+    pts = np.asarray(pts, dtype=float)
+    if pts.ndim == 1:
+        pts = pts.reshape(1, -1)
+    x0 = np.asarray(x0, dtype=float).ravel()
+    centered = pts - x0[np.newaxis, :]
+
+    if basis_matrix is not None:
+        B = np.asarray(basis_matrix, dtype=float)
+        if B.shape[0] != B.shape[1]:
+            raise ValueError("basis_matrix must be square.")
+        if B.shape[0] != centered.shape[1]:
+            raise ValueError("basis_matrix dimension must match points dimension.")
+        return np.linalg.solve(B, centered.T).T
+
+    if rotation is not None:
+        R = np.asarray(rotation, dtype=float)
+        return centered @ R.T
+
+    return centered
+
+
+def _get_box_corners(box):
+    """
+    Extract the corner cloud from an ADS box description.
+
+    Supports the common shapes used in this repo:
+    - box["physical"]["corners"]
+    - box["corners"]
+    - box["box"]["corners"]
+    - fallback from box["min"], box["max"]
+    """
+    if isinstance(box, dict):
+        if "physical" in box and isinstance(box["physical"], dict) and "corners" in box["physical"]:
+            return np.asarray(box["physical"]["corners"], dtype=float)
+        if "corners" in box:
+            return np.asarray(box["corners"], dtype=float)
+        if "box" in box and isinstance(box["box"], dict) and "corners" in box["box"]:
+            return np.asarray(box["box"]["corners"], dtype=float)
+        if "min" in box and "max" in box:
+            min_v = np.asarray(box["min"], dtype=float)
+            max_v = np.asarray(box["max"], dtype=float)
+            ndim = min_v.shape[0]
+            corners = []
+            for bits in itertools.product([0, 1], repeat=ndim):
+                mask = np.asarray(bits, dtype=bool)
+                corners.append(np.where(mask, max_v, min_v))
+            return np.asarray(corners, dtype=float)
+    raise KeyError("Could not extract corners from the provided box.")
+ 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public function
+# ─────────────────────────────────────────────────────────────────────────────
+ 
 def plot_ADS_boxes_3D(
     domain_boxes,
-    points,
-    point_to_domain,
+    points=None,
+    rotation=None,
+    basis_matrix=None,
+    x0=None,
     title_prefix="ADS domains",
-    ndim=6
+    ndim=6,
+    save=False,
+    save_path=".",
+    save_format="png",
+    dpi=150,
 ):
     """
-    Plot 3D delle box ADS e dei punti associati.
-    Separato per posizione (0,1,2) e velocità (3,4,5).
+    Plot ADS boxes using only their corners.
+
+    The geometry is transformed around x0.
+    If basis_matrix is provided, it is treated as a general affine basis B
+    with physical coordinates x = x0 + B u and local coordinates obtained by
+    solving B u = x - x0.
+    Otherwise rotation is treated as an orthonormal rotation:
+        y = (x - x0) @ rotation.T
+
+    The figure shows all pairwise combinations:
+        (dim i vs dim j) for every i != j
+
+    Points, when provided, are transformed with the same map.
+    No box suppression is applied.
     """
-
     cmap = mpl.colormaps.get_cmap("tab10")
-    dim_sets = [(0,1,2), (3,4,5)] if ndim >= 6 else [(0,1,2)]
 
-    for dims in dim_sets:
-        if dims[2] >= ndim:
-            continue
+    def _unwrap(entry):
+        return entry["geometry"] if isinstance(entry, dict) and "geometry" in entry else entry
 
-        fig = plt.figure(figsize=(12, 9))
-        ax = fig.add_subplot(111, projection="3d")
-        i1, i2, i3 = dims
+    boxes = [_unwrap(d) for d in domain_boxes]
 
-        for j_domain, d in enumerate(domain_boxes):
-            indices = np.where(point_to_domain == j_domain)[0]
-            has_pts = indices.size > 0
-            color = cmap(j_domain % 10)
+    if points is not None:
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim == 1:
+            pts = pts.reshape(1, -1)
+    else:
+        pts = None
 
-            # ---- Box ----
-            min_v, max_v = d["min"], d["max"]
-            v = np.array([
-                [min_v[i1], min_v[i2], min_v[i3]],
-                [max_v[i1], min_v[i2], min_v[i3]],
-                [max_v[i1], max_v[i2], min_v[i3]],
-                [min_v[i1], max_v[i2], min_v[i3]],
-                [min_v[i1], min_v[i2], max_v[i3]],
-                [max_v[i1], min_v[i2], max_v[i3]],
-                [max_v[i1], max_v[i2], max_v[i3]],
-                [min_v[i1], max_v[i2], max_v[i3]],
-            ])
+    if pts is not None and x0 is None:
+        x0 = np.zeros(pts.shape[1], dtype=float)
+    elif x0 is None and boxes:
+        first_corners = np.asarray(_get_box_corners(boxes[0]), dtype=float)
+        x0 = np.zeros(first_corners.shape[1], dtype=float)
+    else:
+        x0 = np.asarray(x0, dtype=float).ravel()
 
-            faces = [
-                [v[0],v[1],v[2],v[3]],
-                [v[4],v[5],v[6],v[7]],
-                [v[0],v[1],v[5],v[4]],
-                [v[2],v[3],v[7],v[6]],
-                [v[1],v[2],v[6],v[5]],
-                [v[4],v[7],v[3],v[0]]
-            ]
+    if rotation is not None:
+        R = np.asarray(rotation, dtype=float)
+    else:
+        R = None
 
-            edge_w = 2.0 if has_pts else 0.5
-            edge_c = 'black' if has_pts else color
-            face_a = 0.18 if has_pts else 0.04
+    if pts is not None:
+        pts_rot = _local_coordinates(pts, x0, rotation=R, basis_matrix=basis_matrix)
+    else:
+        pts_rot = None
+ 
+    if ndim < 2:
+        raise ValueError("ndim must be at least 2.")
 
-            poly = Poly3DCollection(
-                faces,
-                facecolors=color,
-                edgecolors=edge_c,
-                linewidths=edge_w,
-                alpha=face_a
-            )
-            ax.add_collection3d(poly)
+    n_panels = ndim
+    panel_size = min(4.2, max(2.5, 18.0 / max(n_panels, 1)))
+    fig, axes = plt.subplots(
+        n_panels,
+        n_panels,
+        figsize=(panel_size * n_panels, panel_size * n_panels),
+        squeeze=False,
+    )
 
-            # ---- Punti ----
-            if has_pts:
+    rotated_boxes = []
+    for j_domain, d in enumerate(boxes):
+        corners = np.asarray(_get_box_corners(d), dtype=float)
+        corners_rot = _local_coordinates(corners, x0, rotation=R, basis_matrix=basis_matrix)
+        rotated_boxes.append(corners_rot)
+
+    for i in range(n_panels):
+        for j in range(n_panels):
+            ax = axes[i, j]
+            if j >= i:
+                ax.axis("off")
+                continue
+
+            dim_x = j
+            dim_y = i
+            if dim_y >= ndim:
+                ax.axis("off")
+                continue
+
+            scene_points = []
+            line_segments = []
+
+            for j_domain, corners_rot in enumerate(rotated_boxes):
+                color = cmap(j_domain % 10)
+                if corners_rot.shape[1] <= dim_y:
+                    continue
+
+                xy = corners_rot[:, [dim_x, dim_y]]
+                scene_points.append(xy)
+
+                try:
+                    hull = ConvexHull(xy)
+                    order = hull.vertices
+                except Exception:
+                    order = np.arange(xy.shape[0])
+                if order.size >= 2:
+                    closed = np.vstack([xy[order], xy[order[0]]])
+                    line_segments.append(closed)
+
+            if pts_rot is not None:
                 ax.scatter(
-                    points[indices, i1],
-                    points[indices, i2],
-                    points[indices, i3],
-                    color=color,
-                    s=70,
-                    edgecolors='white',
-                    linewidth=0.8,
-                    alpha=1.0,
-                    label=f"Box {j_domain} ({len(indices)} pts)"
+                    pts_rot[:, dim_x],
+                    pts_rot[:, dim_y],
+                    color="tab:red",
+                    s=10,
+                    edgecolors="none",
+                    alpha=0.55,
+                    rasterized=True,
                 )
 
-        ax.set_xlabel(f"Dim {i1+1}", fontweight='bold')
-        ax.set_ylabel(f"Dim {i2+1}", fontweight='bold')
-        ax.set_zlabel(f"Dim {i3+1}", fontweight='bold')
+            if line_segments:
+                ax.add_collection(LineCollection(line_segments, colors="black", linewidths=0.9, alpha=0.75))
 
-        space = "Position" if i1 == 0 else "Velocity"
-        ax.set_title(f"{title_prefix} – {space} space", pad=20)
+            ax.set_xlabel(
+                f"Dim {dim_x + 1}" if i == n_panels - 1 else "",
+                fontweight="bold",
+                labelpad=12,
+            )
+            ax.set_ylabel(
+                f"Dim {dim_y + 1}" if j == 0 else "",
+                fontweight="bold",
+                labelpad=12,
+            )
+            if i != n_panels - 1:
+                ax.tick_params(axis="x", labelbottom=False, bottom=False)
+            if j != 0:
+                ax.tick_params(axis="y", labelleft=False, left=False)
+            ax.set_title("")
+            ax.grid(True, alpha=0.25)
 
-        if ax.get_legend_handles_labels()[0]:
-            ax.legend(loc='center left', bbox_to_anchor=(1.1, 0.5))
+            if scene_points:
+                all_scene_points = np.vstack(scene_points)
+                mins = all_scene_points.min(axis=0)
+                maxs = all_scene_points.max(axis=0)
+                span_x = maxs[0] - mins[0]
+                span_y = maxs[1] - mins[1]
+                eps = 1e-9
+                if span_x <= 0:
+                    center_x = mins[0]
+                    span_x = eps
+                    mins_x = center_x - 0.5 * span_x
+                    maxs_x = center_x + 0.5 * span_x
+                else:
+                    pad_x = 0.05 * span_x
+                    mins_x = mins[0] - pad_x
+                    maxs_x = maxs[0] + pad_x
 
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+                if span_y <= 0:
+                    center_y = mins[1]
+                    span_y = eps
+                    mins_y = center_y - 0.5 * span_y
+                    maxs_y = center_y + 0.5 * span_y
+                else:
+                    pad_y = 0.05 * span_y
+                    mins_y = mins[1] - pad_y
+                    maxs_y = maxs[1] + pad_y
 
+                x_center = 0.5 * (mins_x + maxs_x)
+                y_center = 0.5 * (mins_y + maxs_y)
+                half_span = 0.5 * max(maxs_x - mins_x, maxs_y - mins_y)
+                ax.set_xlim(x_center - half_span, x_center + half_span)
+                ax.set_ylim(y_center - half_span, y_center + half_span)
+            ax.set_aspect("equal", adjustable="box")
+
+    fig.subplots_adjust(left=0.08, right=0.985, bottom=0.08, top=0.97, wspace=0.12, hspace=0.12)
+    plt.tight_layout(rect=(0.05, 0.05, 0.99, 0.98))
+
+    if save:
+        if os.path.splitext(save_path)[1]:
+            base, ext = os.path.splitext(save_path)
+            filepath = f"{base}_dim1_vs_all{ext}"
+        else:
+            os.makedirs(save_path, exist_ok=True)
+            filename = f"{title_prefix.replace(' ', '_')}_dim1_vs_all.{save_format}"
+            filepath = os.path.join(save_path, filename)
+        fig.savefig(filepath, dpi=dpi, bbox_inches="tight")
+        print(f"Figure saved to: {filepath}")
+        plt.close(fig)
+    else:
+        plt.show()
 
 def plot_domain_evolution(listOut_opt: List[List[ADSstate]], t_eval: np.ndarray):
     """
@@ -198,42 +372,37 @@ def compute_expansion_errors(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Compute position and velocity errors between optimized and standard expansions.
-    
     Args:
         sample_points: Array of sample points to evaluate (N x 6)
         assignments_opt: List of assignment dictionaries from OPTIMIZED method
         assignments_std: List of assignment dictionaries from STANDARD method
-    
     Returns:
         error_pos: Array of position errors (%)
         error_vel: Array of velocity errors (%)
     """
     error_tot_pos = []
     error_tot_vel = []
-    
-    for idx, point in enumerate(sample_points):
-        expansion_opt = None
-        expansion_std = None
-        
+    sample_finals_opt = np.zeros((len(sample_points), 6))
+    sample_finals_std = np.zeros((len(sample_points), 6))
+
+    for assignment in assignments_opt:
         # OPTIMIZED assignment
-        for assignment in assignments_opt:
-            if np.any(assignment['point_indices'] == idx):
-                central_point_opt = assignment["box"]["center"]
-                delta_state_opt = point - central_point_opt
-                expansion_opt = assignment["DA_map"].eval(delta_state_opt)
-                break
-        
+        for adimensional_point, index in zip(
+            assignment["adimensional_points"], assignment["indices"]  # Fix 1: was `assignment` (iterates dict keys)
+        ):
+            sample_finals_opt[index] = assignment["geometry"]["DA_map"].eval(adimensional_point)
+        # Fix 2: removed erroneous `break` that aborted after the first assignment
+
+    for assignment in assignments_std:
         # STANDARD assignment
-        for assignment in assignments_std:
-            if np.any(assignment['point_indices'] == idx):
-                central_point_std = assignment["box"]["center"]
-                delta_state_std = point - central_point_std
-                expansion_std = assignment["DA_map"].eval(delta_state_std)
-                break
-        
-        if expansion_opt is None or expansion_std is None:
-            continue
-        
+        for adimensional_point, index in zip(
+            assignment["adimensional_points"], assignment["indices"]  # Fix 1 (same)
+        ):
+            sample_finals_std[index] = assignment["geometry"]["DA_map"].eval(adimensional_point)
+        # Fix 2: removed erroneous `break` (same)
+
+    # Fix 3: added loop over evaluated points — `expansion_opt/std` were undefined before
+    for expansion_opt, expansion_std in zip(sample_finals_opt, sample_finals_std):
         error_pos = (
             np.linalg.norm(expansion_opt[0:3] - expansion_std[0:3])
             / np.linalg.norm(expansion_std[0:3])
@@ -246,8 +415,9 @@ def compute_expansion_errors(
         )
         error_tot_pos.append(error_pos)
         error_tot_vel.append(error_vel)
+
+    return np.array(error_tot_pos), np.array(error_tot_vel)  # Fix 4: missing return
     
-    return np.array(error_tot_pos), np.array(error_tot_vel)
 
 
 def compute_cumulative_distribution(errors: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -330,16 +500,18 @@ def main():
     dx, dy, dz = 5e-6, 1e-6, 1e-6
     dvx, dvy, dvz = 1e-7, 1e-7, 1e-7
 
+    vect_0 = np.array([x0, y0, z0, vx0, vy0, vz0])  
+    domain_matrix = np.diag([dx, dy, dz, dvx, dvy, dvz])
     # DA initial state
-    XI = array.zeros(6)
-    XI[0] = x0  + dx  * DA(1)
-    XI[1] = y0  + dy  * DA(2)
-    XI[2] = z0  + dz  * DA(3)
-    XI[3] = vx0 + dvx * DA(4)
-    XI[4] = vy0 + dvy * DA(5)
-    XI[5] = vz0 + dvz * DA(6)
+    domain_DA = [
+        vect_0[i] + sum(
+            DA(k + 1) * domain_matrix[i, k]
+            for k in range(state_dim)
+        )
+            for i in range(state_dim)
+    ]
 
-    init_domains = [ADS(XI, [])]
+    init_domains = [ADS(domain_DA, [])]
 
     # ======================================================================
     # 2. TIME & ADS PARAMETERS
@@ -432,7 +604,9 @@ def main():
     assignments_opt = ADS_utils.assign_points_to_domains(
         final_states_opt,
         sample_points,
-        order_DA=n_order_DA
+        domain_matrix,
+        vect_0,
+        n_order_DA
     )
 
     viz_data_opt = ADS_utils.prepare_visualization_data(
@@ -458,7 +632,9 @@ def main():
     assignments_std = ADS_utils.assign_points_to_domains(
         final_states_std,
         sample_points,
-        order_DA=n_order_DA
+        domain_matrix,
+        vect_0,
+        n_order_DA
     )
 
     viz_data_std = ADS_utils.prepare_visualization_data(
@@ -480,20 +656,35 @@ def main():
     print("=" * 70)
     
     print("\nGenerating OPTIMIZED 3D ADS box plots (final time)...")
+    boxes_opt = ADS_utils.extract_ads_boxes_and_centers(
+    final_states_opt,
+    DA_order=n_order_DA,
+    )
     plot_ADS_boxes_3D(
-        domain_boxes=viz_data_opt["domain_boxes"],
-        points=viz_data_opt["points"],
-        point_to_domain=viz_data_opt["point_to_domain"],
-        title_prefix="ADS domains at final time - OPTIMIZED"
+        boxes_opt,
+        title_prefix=" standard domain evolution",
+        save=False,
+        x0=vect_0,
+        basis_matrix=domain_matrix,
+        points= sample_points,
+        dpi=300,
     )
 
     print("Generating STANDARD 3D ADS box plots (final time)...")
-    plot_ADS_boxes_3D(
-        domain_boxes=viz_data_std["domain_boxes"],
-        points=viz_data_std["points"],
-        point_to_domain=viz_data_std["point_to_domain"],
-        title_prefix="ADS domains at final time - STANDARD"
+    boxes_std = ADS_utils.extract_ads_boxes_and_centers(
+    final_states_std,
+    DA_order=n_order_DA,
     )
+    plot_ADS_boxes_3D(
+        boxes_std,
+        title_prefix=" standard domain evolution",
+        save=False,
+        x0=vect_0,
+        basis_matrix=domain_matrix,
+        points= sample_points,
+        dpi=300,
+    )
+
 
     # ======================================================================
     # 10. ERROR ANALYSIS: OPTIMIZED VS STANDARD

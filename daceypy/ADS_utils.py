@@ -1,339 +1,250 @@
-import numpy as np
-from typing import List, Dict, Tuple, Optional, Union, Any
-from daceypy.DA_utils import extract_map
-from scipy.spatial import KDTree
 import itertools
+from typing import Any, Dict, List, Optional, Union
+import numpy as np
+from scipy.spatial import KDTree
+from daceypy.DA_utils import extract_map
+
+import itertools
+from typing import Any, Dict, List, Union
+
+
+def _patch_corners_from_box(patch: Any) -> np.ndarray:
+    """Return all physical patch corners as an array of shape (2**ndim, ndim)."""
+    ndim = len(patch.manifold)
+    corners = [
+        np.asarray(patch.box.eval(list(signs)), dtype=float).ravel()
+        for signs in itertools.product([-1, 1], repeat=ndim)
+    ]
+    return np.asarray(corners, dtype=float)
+
+
+def _patch_axes_from_box(patch: Any) -> np.ndarray:
+    """Return the patch axes matrix whose columns are the box edge vectors."""
+    ndim = len(patch.manifold)
+    origin = np.asarray(patch.box.eval([0] * ndim), dtype=float).ravel()
+    axes = np.zeros((ndim, ndim), dtype=float)
+    for k in range(ndim):
+        basis_vec = [1 if j == k else 0 for j in range(ndim)]
+        axes[:, k] = np.asarray(patch.box.eval(basis_vec), dtype=float).ravel() - origin
+    return axes
+
+def extract_ads_boxes_and_centers(
+    ADS_domains: Union[List[Any], List[List[Any]]],
+    DA_order: int,
+) -> Union[List[Dict], List[List[Dict]]]:
+    """
+    Extract the physical ADS boxes plus their centers.
+    """
+    is_multiple_times = (
+        isinstance(ADS_domains, list)
+        and len(ADS_domains) > 0
+        and isinstance(ADS_domains[0], list)
+    )
+    ADS_domains_list = ADS_domains if is_multiple_times else [ADS_domains]
+
+    all_geometries: List[List[Dict]] = []
+
+    for ADS_domains_at_time in ADS_domains_list:
+        geometries_at_time: List[Dict] = []
+        for domain in ADS_domains_at_time:
+            patch = domain.ADSPatch
+            ndim = len(patch.manifold)
+
+            physical_origin = np.asarray(patch.box.eval([0] * ndim), dtype=float).ravel()
+            physical_corners = _patch_corners_from_box(patch)
+
+            geometries_at_time.append(
+                {
+                    "DA_map": patch.manifold,
+                    "Taylor_map": extract_map(patch.manifold, DA_order),
+                    "patch_axes": _patch_axes_from_box(patch),
+                    "physical": {
+                        "origin": physical_origin,
+                        "corners": physical_corners,
+                    },
+                }
+            )
+        all_geometries.append(geometries_at_time)
+
+    return all_geometries[0] if not is_multiple_times else all_geometries
 
 
 def extract_all_taylor_maps(
-    ADS_domains: Union[List[Any], List[List[Any]]], 
-    order_DA: int
+    ADS_domains: Union[List[Any], List[List[Any]]],
+    order_DA: int,
 ) -> Union[List[Dict], List[List[Dict]]]:
     """
     Extract Taylor maps from all ADS domains independently of any points.
-    
-    Parameters
-    ----------
-    ADS_domains : list[ADSstate] or list[list[ADSstate]]
-        - If list: Single list of ADSstate objects (with ADSPatch attribute)
-        - If list of lists: Multiple lists of ADSstate objects (one per time)
-    order_DA : int
-        Order for extracting the Taylor expansion (DA map)
-    
-    Returns
-    -------
-    taylor_maps : list[dict] or list[list[dict]]
-        - If single ADS_domains list: Single list of Taylor map dicts
-        - If multiple ADS_domains lists: List of lists of Taylor map dicts (one per time)
-        
-        Each dict contains:
-            - 'taylor_map': np.ndarray - extracted DA map
-            - 'DA_map': DA object - raw DA manifold
-            - 'bounding_box': dict with 'min', 'max', 'center' (all np.ndarray)
-            - 'manifold_dim': int - dimension of the manifold
     """
-    # Check if input is a list of lists (multiple times) or single list
-    is_multiple_times: bool = (
-        isinstance(ADS_domains, list) and 
-        len(ADS_domains) > 0 and 
-        isinstance(ADS_domains[0], list)
+    is_multiple_times = (
+        isinstance(ADS_domains, list)
+        and len(ADS_domains) > 0
+        and isinstance(ADS_domains[0], list)
     )
-    
-    # If single list, wrap it to use same logic
-    ADS_domains_list: List[List[Any]] = ADS_domains if is_multiple_times else [ADS_domains]
-    
-    # Process each time step
+    ADS_domains_list = ADS_domains if is_multiple_times else [ADS_domains]
+
     all_taylor_maps: List[List[Dict]] = []
-    
-    for _, ADS_domains_at_time in enumerate(ADS_domains_list):
-        # Extract ADS patches from domain objects
-        patches: List[Any] = [domain.ADSPatch for domain in ADS_domains_at_time]
-        
+    for ADS_domains_at_time in ADS_domains_list:
         taylor_maps_at_time: List[Dict] = []
-        for patch in patches:
-            # Get dimension from manifold
-            ndim: int = len(patch.manifold)
-            
-            # Compute bounding box in physical space
-            min_corner: np.ndarray = np.array(patch.box.eval([-1] * ndim)).reshape(ndim)
-            max_corner: np.ndarray = np.array(patch.box.eval([+1] * ndim)).reshape(ndim)
-            center: np.ndarray = 0.5 * (min_corner + max_corner)
-            
-            # Extract Taylor map
-            taylor_map: np.ndarray = extract_map(patch.manifold, order_DA)
+        for domain in ADS_domains_at_time:
+            patch = domain.ADSPatch
+            ndim = len(patch.manifold)
+            origin = np.asarray(patch.box.eval([0] * ndim), dtype=float).ravel()
 
-            taylor_maps_at_time.append({
-                'Taylor_map': taylor_map,
-                'DA_map': patch.manifold,
-                'bounding_box': {
-                    'min': min_corner,
-                    'max': max_corner,
-                    'center': center
-                },
-                'manifold_dim': ndim
-            })
-        
+            taylor_maps_at_time.append(
+                {
+                    "Taylor_map": extract_map(patch.manifold, order_DA),
+                    "DA_map": patch.manifold,
+                    "box": {
+                        "origin": origin,
+                        "corners": _patch_corners_from_box(patch),
+                    },
+                    "manifold_dim": ndim,
+                }
+            )
         all_taylor_maps.append(taylor_maps_at_time)
-    
-    # Return single list if input was single list, otherwise return list of lists
+
     return all_taylor_maps[0] if not is_multiple_times else all_taylor_maps
-
-
-"""
-Improved assign_points_to_domains
-──────────────────────────────────
-Each assignment dict now carries two extra sections keyed with the
-prefix  "basis_"  to make the local-coordinate data easy to spot:
-
-    "basis_box"    : {"min", "max", "center"}
-                     The axis-aligned bounds of the patch expressed in
-                     parametric (u) space.  By construction the patch is
-                     defined on  u ∈ [-1, 1]^n, so these are always
-                     (-1…-1), (+1…+1), (0…0) – stored explicitly so
-                     downstream code can treat physical and basis dicts
-                     symmetrically.
-
-    "basis_points" : np.ndarray, shape (n_assigned, ndim)
-                     The assigned points converted to local coordinates:
-                         u_i = Axes^{-1} @ (x_i - origin)
-                     All entries satisfy |u_ij| ≤ 1 (up to the membership
-                     tolerance), confirming correct assignment.
-"""
 
 
 def assign_points_to_domains(
     ADS_domains: Union[List[Any], List[List[Any]]],
     points: np.ndarray,
-    order_DA: Optional[int] = None,
-    basis: Optional[np.ndarray] = None,          # kept for API compatibility
+    domain_matrix: np.ndarray,
+    origin: np.ndarray,
+    DA_order: np.ndarray,
 ) -> Union[List[Dict], List[List[Dict]]]:
     """
-    Assign points to ADS sub-domains using an exact membership test.
+    Assign physical points to the corresponding ADS sub-domains or patches.
 
-    Physical-space parametrisation of each patch
-    ─────────────────────────────────────────────
-        x = origin + Axes @ u,   u ∈ [-1, 1]^n
-
-    where
-        origin       = patch.box.eval([0, 0, …, 0])
-        Axes[:, k]   = patch.box.eval(e_k) - origin   (k-th column)
-
-    A point x0 belongs to patch d iff ALL components of
-        u0 = Axes_d^{-1} @ (x0 - origin_d)
-    satisfy |u0_k| ≤ 1  (with a small tolerance).
+    This function determines the membership of discrete points within a set of 
+    partitioned Differential Algebra (DA) domains. It handles coordinate transformations 
+    between the global physical space and the local normalized (adimensional) 
+    coordinates of each patch.
 
     Parameters
-    ──────────
-    ADS_domains : list[ADSstate] or list[list[ADSstate]]
-    points      : array-like, shape (N, ndim)
-    order_DA    : int, optional
-        When provided, Taylor maps are extracted and stored under
-        "Taylor_map" in each assignment dict.
-    basis       : np.ndarray, shape (ndim, ndim), optional
-        Stored verbatim under "basis" in each assignment dict for
-        downstream use (e.g. compute_stm_stt_ADS).  Does NOT influence
-        domain assignment.
+    ----------
+    ADS_domains : list or list of lists
+        The set of ADS domains (potentially over multiple time steps).
+    points : ndarray, shape (n_points, ndim)
+        Physical state vectors to be assigned to sub-domains.
+    domain_matrix : ndarray, shape (ndim, ndim)
+        The primary transformation matrix defining the global DA domain.
+    origin : ndarray, shape (ndim,)
+        The global center of the parent ADS domain.
+    DA_order : ndarray
+        The order of the Taylor expansions within the patches.
 
     Returns
-    ───────
-    list[dict] or list[list[dict]]
-
-    Each dict contains
-    ──────────────────
-    "domain_index"  : int
-    "point_indices" : np.ndarray[int]   – indices into *points*
-    "n_points"      : int
-    "DA_map"        : DA manifold object
-    "box"           : {"min", "max", "center"}  – in physical space
-    "patch_origin"  : np.ndarray, shape (ndim,)
-    "patch_axes"    : np.ndarray, shape (ndim, ndim)  – columns = axis vecs
-    "basis_box"     : {"min", "max", "center"}  – in local (u) space
-                      always (-1…), (+1…), (0…) but explicit for symmetry
-    "basis_points"  : np.ndarray, shape (n_assigned, ndim)
-                      assigned points expressed in u-coordinates
-    "Taylor_map"    : dict  (only when order_DA is not None)
-    "basis"         : np.ndarray  (only when basis is not None)
+    -------
+    list or list of lists
+        A structured assignment containing:
+        - domain_index: The index of the assigned patch.
+        - geometry: Local Taylor maps, axes, and physical boundaries.
+        - physical_points: Points assigned to this domain in state coordinates.
+        - adimensional_points: Local coordinates in the range [-1, 1]^n.
     """
-
     points_array = np.asarray(points, dtype=np.float64)
     if points_array.ndim == 1:
         points_array = points_array.reshape(1, -1)
     n_points, ndim = points_array.shape
 
-    # ------------------------------------------------------------------ #
-    # Normalise input to always be a list-of-lists                        #
-    # ------------------------------------------------------------------ #
-    is_multiple_times: bool = (
+    # Check if the input contains domains for multiple time-steps
+    is_multiple_times = (
         isinstance(ADS_domains, list)
         and len(ADS_domains) > 0
         and isinstance(ADS_domains[0], list)
     )
     domains_list = ADS_domains if is_multiple_times else [ADS_domains]
-
-    # Constant basis-space box – the same for every patch by definition
-    basis_box_min    = np.full(ndim, -1.0)
-    basis_box_max    = np.full(ndim,  1.0)
-    basis_box_center = np.zeros(ndim)
+    inv_domain_matrix = np.linalg.inv(domain_matrix)
 
     all_point_assignments: List[List[Dict]] = []
+    membership_tol = 1e-10
 
-    # ================================================================== #
-    #  Main loop over time steps                                          #
-    # ================================================================== #
     for ADS_domains_at_time in domains_list:
-
-        patches   = [d.ADSPatch for d in ADS_domains_at_time]
+        patches = [domain.ADSPatch for domain in ADS_domains_at_time]
         n_domains = len(patches)
 
-        # -------------------------------------------------------------- #
-        # 1.  Compute patch geometry                                      #
-        # -------------------------------------------------------------- #
-        patch_origins = np.zeros((n_domains, ndim))
-        patch_axes    = np.zeros((n_domains, ndim, ndim))
-        patch_axes_inv = np.zeros((n_domains, ndim, ndim))   # pre-computed inverse
+        # Retrieve geometry data (corners, origins, and Taylor maps) for each patch
+        geometries = extract_ads_boxes_and_centers(ADS_domains_at_time, DA_order)
 
-        phys_mins    = np.zeros((n_domains, ndim))
-        phys_maxs    = np.zeros((n_domains, ndim))
-        phys_centers = np.zeros((n_domains, ndim))
-
-        for i, patch in enumerate(patches):
-            origin = np.asarray(patch.box.eval([0] * ndim), dtype=float).ravel()
-            patch_origins[i] = origin
-
-            for k in range(ndim):
-                ek = [1 if j == k else 0 for j in range(ndim)]
-                patch_axes[i, :, k] = (
-                    np.asarray(patch.box.eval(ek), dtype=float).ravel() - origin
-                )
-
-            # Pre-invert (used repeatedly in the membership tests and for
-            # computing basis_points later – pay the cost once per patch)
-            try:
-                patch_axes_inv[i] = np.linalg.inv(patch_axes[i])
-            except np.linalg.LinAlgError:
-                patch_axes_inv[i] = np.full((ndim, ndim), np.nan)
-
-            # Axis-aligned bounding box from all 2^n corners
-            corners = np.array([
-                np.asarray(patch.box.eval(list(s)), dtype=float).ravel()
-                for s in itertools.product([-1, 1], repeat=ndim)
-            ])
-            phys_mins[i]    = corners.min(axis=0)
-            phys_maxs[i]    = corners.max(axis=0)
-            phys_centers[i] = 0.5 * (phys_mins[i] + phys_maxs[i])
-
-        tree = KDTree(phys_centers)
-
-        # -------------------------------------------------------------- #
-        # 2.  Assign each point to its patch                             #
-        # -------------------------------------------------------------- #
-        MEMBERSHIP_TOL = 1e-10
-
+        physical_origins = np.array([g["physical"]["origin"] for g in geometries], dtype=float)
+        physical_corners = np.array([g["physical"]["corners"] for g in geometries], dtype=float)
+        patch_axes = np.array([g["patch_axes"] for g in geometries], dtype=float)
+        
         point_to_domain = np.full(n_points, -1, dtype=np.int64)
+        
+        # Transform physical points to the normalized global DA space
+        rotated_points = (inv_domain_matrix @ (points_array - origin).T).T
+        rotated_points_all = np.repeat(rotated_points[:, None, :], n_domains, axis=1)
 
-        # Vectorised AABB pre-filter  (n_points × n_domains)
-        inside_aabb = np.all(
-            (points_array[:, np.newaxis, :] >= phys_mins[np.newaxis]) &
-            (points_array[:, np.newaxis, :] <= phys_maxs[np.newaxis]),
+        # Pre-compute rotated boundaries for efficient membership testing
+        rotated_mins = np.empty((n_domains, ndim), dtype=float)
+        rotated_maxs = np.empty((n_domains, ndim), dtype=float)
+        rotated_centers = np.empty((n_domains, ndim), dtype=float)
+ 
+        for d in range(n_domains):
+            rotated_corners = (inv_domain_matrix @ (physical_corners[d] - origin).T).T
+            rotated_mins[d] = rotated_corners.min(axis=0)
+            rotated_maxs[d] = rotated_corners.max(axis=0)
+            rotated_centers[d] = rotated_corners.mean(axis=0)
+
+        # vectorized check: check if points fall within the rotated bounding box of each patch
+        inside_rotated_box = np.all(
+            (rotated_points_all >= (rotated_mins[np.newaxis, :, :] - membership_tol))
+            & (rotated_points_all <= (rotated_maxs[np.newaxis, :, :] + membership_tol)),
             axis=2,
         )
 
-        def _exact_u(d: int, x0: np.ndarray) -> Optional[np.ndarray]:
-            """Return u = Axes^{-1}(x0 - origin), or None if singular."""
-            Ainv = patch_axes_inv[d]
-            if np.any(np.isnan(Ainv)):
-                return None
-            return Ainv @ (x0 - patch_origins[d])
-
-        def _in_patch(d: int, x0: np.ndarray) -> bool:
-            u = _exact_u(d, x0)
-            return (u is not None) and np.all(np.abs(u) <= 1.0 + MEMBERSHIP_TOL)
+        # Spatial tree for handling points outside the explicitly defined domains
+        tree = KDTree(physical_origins)
 
         for i in range(n_points):
-            x0 = points_array[i]
-            candidates = np.where(inside_aabb[i])[0]
-
-            exact_inside = [d for d in candidates if _in_patch(d, x0)]
-
-            if len(exact_inside) == 1:
-                point_to_domain[i] = exact_inside[0]
-
-            elif len(exact_inside) > 1:
-                # Rare overlap – pick the patch with smallest |u|
-                u_norms = []
-                for d in exact_inside:
-                    u = _exact_u(d, x0)
-                    u_norms.append(np.linalg.norm(u) if u is not None else np.inf)
-                point_to_domain[i] = exact_inside[int(np.argmin(u_norms))]
-
+            candidates = np.where(inside_rotated_box[i])[0]
+            if candidates.size == 1:
+                point_to_domain[i] = candidates[0]
+            elif candidates.size > 1:
+                # Disambiguate overlapping boundaries using distance to the patch center
+                distances = [
+                    np.linalg.norm(rotated_points_all[i, d] - rotated_centers[d])
+                    for d in candidates
+                ]
+                point_to_domain[i] = candidates[int(np.argmin(distances))]
             else:
-                # AABB pre-filter missed – try ALL patches exactly
-                truly_inside = [d for d in range(n_domains) if _in_patch(d, x0)]
+                # Assign to the nearest domain if no boundary is intersected
+                _, nearest = tree.query(points_array[i], workers=-1)
+                point_to_domain[i] = nearest
 
-                if len(truly_inside) == 1:
-                    point_to_domain[i] = truly_inside[0]
-                elif len(truly_inside) > 1:
-                    u_norms = []
-                    for d in truly_inside:
-                        u = _exact_u(d, x0)
-                        u_norms.append(np.linalg.norm(u) if u is not None else np.inf)
-                    point_to_domain[i] = truly_inside[int(np.argmin(u_norms))]
-                else:
-                    # Hard fallback: nearest physical centre
-                    _, nearest = tree.query(x0)
-                    point_to_domain[i] = nearest
-
-        # -------------------------------------------------------------- #
-        # 3.  Build per-domain assignment dicts                          #
-        # -------------------------------------------------------------- #
+        # Compile assignment results with local adimensional coordinates
         point_assignments: List[Dict] = []
-
         for d in range(n_domains):
             idx = np.where(point_to_domain == d)[0]
             if idx.size == 0:
                 continue
 
-            phys_pts = points_array[idx]          # (n_assigned, ndim)
-
-            # ---- basis_points: transform assigned points → u-space ---- #
-            # u_i = Axes_d^{-1} @ (x_i - origin_d)
-            # shape: (n_assigned, ndim)
-            basis_pts = (patch_axes_inv[d] @ (phys_pts - patch_origins[d]).T).T
-
+            physical_points = points_array[idx]
+            # Convert physical coordinates back to local patch space [-1, 1]
+            adimensional_points = np.array(
+                [np.linalg.solve(patch_axes[d], x - physical_origins[d]) for x in physical_points],
+                dtype=float,
+            )
+            
             entry: Dict = {
-                # ── physical-space geometry ──────────────────────────── #
-                "domain_index":  d,
-                "point_indices": idx,
-                "n_points":      len(idx),
-                "DA_map":        patches[d].manifold,
-                "box": {
-                    "min":    phys_mins[d],
-                    "max":    phys_maxs[d],
-                    "center": phys_centers[d],
+                "domain_index": d,
+                "n_points": len(idx),
+                "geometry": {
+                    "DA_map": patches[d].manifold,
+                    "Taylor_map": geometries[d]["Taylor_map"],
+                    "patch_axes": patch_axes[d],
+                    "physical": {
+                        "origin": physical_origins[d],
+                        "corners": physical_corners[d],
+                    },
                 },
-                "patch_origin": patch_origins[d],
-                "patch_axes":   patch_axes[d],     # columns = axis vectors
-
-                # ── basis / local (u) space ──────────────────────────── #
-                # "basis_box" describes the parametric extent of the patch.
-                # By definition this is always [-1,1]^n; stored explicitly
-                # so callers can use "basis_box" and "box" symmetrically.
-                "basis_box": {
-                    "min":    basis_box_min.copy(),
-                    "max":    basis_box_max.copy(),
-                    "center": basis_box_center.copy(),
-                },
-                # Each assigned point expressed in local coordinates.
-                # All entries should satisfy |u_ij| ≤ 1 + tol.
-                "basis_points": basis_pts,
+                'indices': idx,
+                "physical_points": physical_points,
+                "adimensional_points": adimensional_points,
             }
-
-            if order_DA is not None:
-                entry["Taylor_map"] = extract_map(patches[d].manifold, order_DA)
-
-            if basis is not None:
-                entry["basis"] = basis
-
             point_assignments.append(entry)
 
         all_point_assignments.append(point_assignments)
